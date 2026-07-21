@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.sakus.packdroid.data.ModrinthClient
 import dev.sakus.packdroid.data.PackRepository
+import dev.sakus.packdroid.data.VersionCatalogClient
 import dev.sakus.packdroid.export.PackExporter
 import dev.sakus.packdroid.model.ExportFormat
 import dev.sakus.packdroid.model.ModSource
@@ -31,6 +32,9 @@ data class PackUiState(
     val selectedTab: Int = 0,
     val query: String = "",
     val searchResults: List<ModrinthProject> = emptyList(),
+    val minecraftVersions: List<String> = emptyList(),
+    val loaderVersions: List<String> = emptyList(),
+    val versionCatalogBusy: Boolean = false,
     val busy: Boolean = false,
     val message: String? = null
 )
@@ -38,10 +42,15 @@ data class PackUiState(
 class PackViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = PackRepository(application)
     private val modrinth = ModrinthClient(application)
+    private val versionCatalog = VersionCatalogClient()
     private val exporter = PackExporter()
 
     private val _state = MutableStateFlow(PackUiState(project = repository.load()))
     val state: StateFlow<PackUiState> = _state.asStateFlow()
+
+    init {
+        refreshVersionCatalog(showMessage = false)
+    }
 
     fun selectTab(tab: Int) = _state.update { it.copy(selectedTab = tab) }
     fun setQuery(value: String) = _state.update { it.copy(query = value) }
@@ -51,6 +60,83 @@ class PackViewModel(application: Application) : AndroidViewModel(application) {
         val updated = transform(_state.value.project)
         repository.save(updated)
         _state.update { it.copy(project = updated) }
+    }
+
+    fun setMinecraftVersion(value: String) {
+        updateProject { it.copy(minecraftVersion = value) }
+        _state.update { it.copy(searchResults = emptyList()) }
+    }
+
+    fun selectMinecraftVersion(value: String) {
+        val hasMods = _state.value.project.mods.isNotEmpty()
+        setMinecraftVersion(value)
+        if (hasMods) {
+            _state.update {
+                it.copy(message = "Minecraftバージョンを変更しました。追加済みMODの互換性を確認してください")
+            }
+        }
+        refreshLoaderVersions(showMessage = false)
+    }
+
+    fun selectLoader(loader: String) {
+        updateProject { it.copy(loader = loader, loaderVersion = "") }
+        _state.update { it.copy(searchResults = emptyList(), loaderVersions = emptyList()) }
+        refreshLoaderVersions(showMessage = false)
+    }
+
+    fun setLoaderVersion(value: String) {
+        updateProject { it.copy(loaderVersion = value) }
+    }
+
+    fun selectLoaderVersion(value: String) {
+        setLoaderVersion(value)
+    }
+
+    fun refreshVersionCatalog(showMessage: Boolean = true) {
+        val snapshot = _state.value.project
+        viewModelScope.launch {
+            setVersionCatalogBusy(true)
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val minecraftVersions = versionCatalog.listMinecraftVersions()
+                    val loaderVersions = versionCatalog.listLoaderVersions(
+                        snapshot.loader,
+                        snapshot.minecraftVersion
+                    )
+                    minecraftVersions to loaderVersions
+                }
+            }.onSuccess { (minecraftVersions, loaderVersions) ->
+                applyVersionCatalog(minecraftVersions, loaderVersions)
+                if (showMessage) {
+                    _state.update { it.copy(message = "バージョン候補を更新しました") }
+                }
+            }.onFailure(::showError)
+            setVersionCatalogBusy(false)
+        }
+    }
+
+    fun refreshLoaderVersions(showMessage: Boolean = true) {
+        val snapshot = _state.value.project
+        if (snapshot.loader == "vanilla") {
+            _state.update { it.copy(loaderVersions = emptyList()) }
+            return
+        }
+        viewModelScope.launch {
+            setVersionCatalogBusy(true)
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    versionCatalog.listLoaderVersions(snapshot.loader, snapshot.minecraftVersion)
+                }
+            }.onSuccess { versions ->
+                applyLoaderVersions(versions)
+                if (showMessage) {
+                    _state.update {
+                        it.copy(message = if (versions.isEmpty()) "候補がありません。手入力してください" else "${versions.size}件の候補を取得しました")
+                    }
+                }
+            }.onFailure(::showError)
+            setVersionCatalogBusy(false)
+        }
     }
 
     fun search() {
@@ -178,6 +264,30 @@ class PackViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun applyVersionCatalog(
+        minecraftVersions: List<String>,
+        loaderVersions: List<String>
+    ) {
+        applyLoaderVersions(loaderVersions)
+        _state.update { it.copy(minecraftVersions = minecraftVersions) }
+    }
+
+    private fun applyLoaderVersions(versions: List<String>) {
+        val current = _state.value.project
+        val selected = when {
+            current.loader == "vanilla" -> ""
+            current.loaderVersion in versions -> current.loaderVersion
+            versions.isNotEmpty() -> versions.first()
+            else -> current.loaderVersion
+        }
+        val updatedProject = if (selected != current.loaderVersion) {
+            current.copy(loaderVersion = selected).also(repository::save)
+        } else {
+            current
+        }
+        _state.update { it.copy(project = updatedProject, loaderVersions = versions) }
+    }
+
     private fun resolveProject(
         project: ModrinthProject,
         pack: PackProject,
@@ -257,6 +367,9 @@ class PackViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun setBusy(value: Boolean) = _state.update { it.copy(busy = value) }
+
+    private fun setVersionCatalogBusy(value: Boolean) =
+        _state.update { it.copy(versionCatalogBusy = value) }
 
     private fun showError(error: Throwable) {
         _state.update {
