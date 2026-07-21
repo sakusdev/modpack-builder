@@ -28,10 +28,22 @@ jobs:
           gradle-version: "8.9"
 
       - name: Run unit tests
-        run: gradle --no-daemon :app:testDebugUnitTest
+        shell: bash
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest > gradle-test.log 2>&1 || {
+            tail -n 100 gradle-test.log
+            exit 1
+          }
+          tail -n 30 gradle-test.log
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        shell: bash
+        run: |
+          gradle --no-daemon :app:assembleDebug > gradle-build.log 2>&1 || {
+            tail -n 100 gradle-build.log
+            exit 1
+          }
+          tail -n 30 gradle-build.log
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
