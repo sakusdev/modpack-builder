@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,6 +18,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -33,7 +36,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -79,7 +84,7 @@ fun PackDroidApp(vm: PackViewModel = viewModel()) {
                     Column {
                         Text("PackDroid", fontWeight = FontWeight.Bold)
                         Text(
-                            "${state.project.minecraftVersion} / ${state.project.loader}",
+                            "${state.project.minecraftVersion} / ${state.project.loader} ${state.project.loaderVersion}",
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -102,10 +107,16 @@ fun PackDroidApp(vm: PackViewModel = viewModel()) {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (state.selectedTab) {
                     0 -> EditorScreen(
-                        state.project,
-                        vm::updateProject,
-                        { jarPicker.launch(arrayOf("application/java-archive", "application/octet-stream")) },
-                        vm::removeMod
+                        state = state,
+                        update = vm::updateProject,
+                        setMinecraftVersion = vm::setMinecraftVersion,
+                        selectMinecraftVersion = vm::selectMinecraftVersion,
+                        selectLoader = vm::selectLoader,
+                        setLoaderVersion = vm::setLoaderVersion,
+                        selectLoaderVersion = vm::selectLoaderVersion,
+                        refreshVersions = { vm.refreshVersionCatalog() },
+                        addJar = { jarPicker.launch(arrayOf("application/java-archive", "application/octet-stream")) },
+                        remove = vm::removeMod
                     )
                     1 -> SearchScreen(state, vm::setQuery, vm::search, vm::addProject)
                     else -> ExportScreen(
@@ -117,10 +128,15 @@ fun PackDroidApp(vm: PackViewModel = viewModel()) {
                 }
                 if (state.busy) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Card { Row(Modifier.padding(20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            CircularProgressIndicator()
-                            Text("処理中…", modifier = Modifier.align(Alignment.CenterVertically))
-                        } }
+                        Card {
+                            Row(
+                                Modifier.padding(20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text("処理中…", modifier = Modifier.align(Alignment.CenterVertically))
+                            }
+                        }
                     }
                 }
             }
@@ -130,11 +146,18 @@ fun PackDroidApp(vm: PackViewModel = viewModel()) {
 
 @Composable
 private fun EditorScreen(
-    project: PackProject,
+    state: PackUiState,
     update: ((PackProject) -> PackProject) -> Unit,
+    setMinecraftVersion: (String) -> Unit,
+    selectMinecraftVersion: (String) -> Unit,
+    selectLoader: (String) -> Unit,
+    setLoaderVersion: (String) -> Unit,
+    selectLoaderVersion: (String) -> Unit,
+    refreshVersions: () -> Unit,
     addJar: () -> Unit,
     remove: (PackMod) -> Unit
 ) {
+    val project = state.project
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -144,20 +167,59 @@ private fun EditorScreen(
         item { Field(project.name, "MODPACK名") { value -> update { it.copy(name = value) } } }
         item { Field(project.versionId, "パックバージョン") { value -> update { it.copy(versionId = value) } } }
         item { Field(project.summary, "説明", false) { value -> update { it.copy(summary = value) } } }
-        item { Field(project.minecraftVersion, "Minecraftバージョン") { value -> update { it.copy(minecraftVersion = value) } } }
+        item {
+            VersionField(
+                value = project.minecraftVersion,
+                label = "Minecraftバージョン",
+                options = state.minecraftVersions,
+                loading = state.versionCatalogBusy,
+                onValueChange = setMinecraftVersion,
+                onSelect = selectMinecraftVersion
+            )
+        }
         item {
             Text("ローダー", style = MaterialTheme.typography.titleMedium)
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 listOf("fabric", "forge", "neoforge", "quilt").forEach { loader ->
                     FilterChip(
                         selected = project.loader == loader,
-                        onClick = { update { it.copy(loader = loader) } },
+                        onClick = { selectLoader(loader) },
                         label = { Text(loader) }
                     )
                 }
             }
         }
-        item { Field(project.loaderVersion, "ローダーバージョン") { value -> update { it.copy(loaderVersion = value) } } }
+        item {
+            VersionField(
+                value = project.loaderVersion,
+                label = "${project.loader}バージョン",
+                options = state.loaderVersions,
+                loading = state.versionCatalogBusy,
+                onValueChange = setLoaderVersion,
+                onSelect = selectLoaderVersion
+            )
+        }
+        item {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = refreshVersions,
+                    enabled = !state.versionCatalogBusy
+                ) {
+                    Text(if (state.versionCatalogBusy) "取得中…" else "バージョン候補を更新")
+                }
+                Text(
+                    "一覧にない値は直接入力できます",
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -172,6 +234,50 @@ private fun EditorScreen(
         } else {
             items(project.mods, key = { "${it.projectId}:${it.versionId}:${it.cachedPath}" }) { mod ->
                 ModRow(mod) { remove(mod) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VersionField(
+    value: String,
+    label: String,
+    options: List<String>,
+    loading: Boolean,
+    onValueChange: (String) -> Unit,
+    onSelect: (String) -> Unit
+) {
+    var expanded by remember(label, options) { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(label) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            trailingIcon = {
+                TextButton(
+                    onClick = { expanded = true },
+                    enabled = options.isNotEmpty() && !loading
+                ) {
+                    Text(if (loading) "…" else "選択")
+                }
+            }
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.fillMaxWidth(0.9f).heightIn(max = 360.dp)
+        ) {
+            options.take(150).forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    }
+                )
             }
         }
     }
@@ -220,8 +326,18 @@ private fun SearchScreen(
             Text("${state.project.minecraftVersion} / ${state.project.loader} で検索")
         }
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(state.query, setQuery, Modifier.weight(1f), label = { Text("MOD名") }, singleLine = true)
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    state.query,
+                    setQuery,
+                    Modifier.weight(1f),
+                    label = { Text("MOD名") },
+                    singleLine = true
+                )
                 Button(onClick = search) { Text("検索") }
             }
         }
